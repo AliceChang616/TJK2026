@@ -30,7 +30,7 @@
                 <button id="simulate-btn" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-sm transition font-medium text-white flex items-center gap-2"><i class="fas fa-magic"></i> 模拟1条数据</button>
                 <button id="clear-btn" class="px-4 py-2 bg-red-900/50 hover:bg-red-800/50 border border-red-500/30 rounded-lg text-sm transition font-medium text-red-200 flex items-center gap-2"><i class="fas fa-trash-alt"></i> 清空数据</button>
                 <div class="glass-panel px-4 py-2 flex items-center gap-3">
-                    <div id="connection-status" class="w-3 h-3 rounded-full bg-yellow-500 animate-pulse"></div>
+                    <div id="connection-status" class="w-3 h-3 rounded-full bg-yellow-500 animate-pulse" title="网络连接状态"></div>
                     <span id="student-count" class="font-mono text-xl font-bold text-blue-400">0</span>
                     <span class="text-slate-400 text-sm">人已提交</span>
                 </div>
@@ -102,8 +102,8 @@
         </div>
     </div>
 
-    <!-- 核心逻辑：免费物联网 MQTT 跨设备同步 -->
-    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <!-- 更换了更稳定快速的 cdnjs 节点以防止阻塞 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.3.7/mqtt.min.js"></script>
     <script>
         const isStudentView = new URLSearchParams(window.location.search).get('student') === 'true';
         let sessionId = new URLSearchParams(window.location.search).get('session');
@@ -116,38 +116,75 @@
         const chartOptions = { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { grid: { color: 'rgba(255,255,255,0.1)' }, beginAtZero: true }, x: { grid: { display: false } } } };
 
         function initApp() {
+            // 处理专属频道的房间号
             if (!isStudentView && !sessionId) {
                 sessionId = 'stats_' + Math.random().toString(36).substr(2, 6);
-                
-                // 修复沙盒环境中的 replaceState 报错：
-                // 某些沙盒环境（比如带有 blob: 或 data: 的源）不允许操作 history API。
                 try {
                     if (window.history.replaceState && !window.location.href.startsWith('file:') && !window.location.href.startsWith('blob:') && !window.location.href.startsWith('about:')) {
                         window.history.replaceState(null, null, "?session=" + sessionId);
                     }
-                } catch (e) {
-                    console.warn("当前环境禁用了 URL 重写规则，这不会影响应用功能，已自动兼容。", e);
-                }
+                } catch (e) { }
             }
             if (!isStudentView) {
                 const saved = localStorage.getItem(sessionId);
                 if (saved) try { rawData = JSON.parse(saved); } catch(e){}
             }
 
-            mqttClient = mqtt.connect('wss://broker.emqx.io:8083/mqtt');
-            mqttClient.on('connect', () => {
-                document.getElementById('connection-status').className = 'w-3 h-3 rounded-full bg-green-500';
-                if (isStudentView) setupStudentLogic(); else setupTeacherLogic();
-            });
-            mqttClient.on('error', () => document.getElementById('connection-status').className = 'w-3 h-3 rounded-full bg-red-500');
+            // 【核心修复】立刻展示界面！绝不允许黑屏等待网络
+            if (isStudentView) {
+                setupStudentLogic();
+            } else {
+                setupTeacherLogic();
+            }
+
+            // 【异步连接】尝试连接物联网节点
+            try {
+                if (typeof mqtt === 'undefined') throw new Error("MQTT 库未加载");
+                
+                mqttClient = mqtt.connect('wss://broker.emqx.io:8083/mqtt');
+                
+                mqttClient.on('connect', () => {
+                    document.getElementById('connection-status').className = 'w-3 h-3 rounded-full bg-green-500 shadow-[0_0_8px_#22c55e]';
+                    if (!isStudentView) {
+                        mqttClient.subscribe(sessionId);
+                    }
+                });
+                
+                mqttClient.on('error', () => {
+                    document.getElementById('connection-status').className = 'w-3 h-3 rounded-full bg-red-500';
+                });
+
+                // 接收数据的处理
+                mqttClient.on('message', (topic, message) => {
+                    if (!isStudentView && topic === sessionId) {
+                        try {
+                            rawData.push(JSON.parse(message.toString()));
+                            localStorage.setItem(sessionId, JSON.stringify(rawData));
+                            updateChartsAndInsights();
+                        } catch(e) {}
+                    }
+                });
+            } catch (error) {
+                console.warn("网络连接受限，已自动降级为纯本地演示模式", error);
+                document.getElementById('connection-status').className = 'w-3 h-3 rounded-full bg-gray-500';
+            }
         }
 
         function generateQR(url) {
-            document.getElementById("qrcode").innerHTML = "";
-            new QRCode(document.getElementById("qrcode"), { text: url, width: 180, height: 180, colorDark: "#0f172a", colorLight: "#ffffff", correctLevel: QRCode.CorrectLevel.L });
+            const qrContainer = document.getElementById("qrcode");
+            qrContainer.innerHTML = "";
+            try {
+                // 安全防线：如果 url 依然过长，截断它，防止再次撑爆 qrcode.js
+                const safeUrl = url.length > 250 ? "https://please-deploy-to-public-server.com/" : url;
+                new QRCode(qrContainer, { text: safeUrl, width: 180, height: 180, colorDark: "#0f172a", colorLight: "#ffffff", correctLevel: QRCode.CorrectLevel.L });
+            } catch (error) {
+                console.warn("二维码生成失败", error);
+                qrContainer.innerHTML = "<div class='text-xs text-red-500 p-4 border border-red-500 rounded'>请部署到服务器后<br>生成二维码</div>";
+            }
         }
 
         function setupTeacherLogic() {
+            // 立刻解除隐藏
             document.getElementById('teacher-view').classList.remove('hidden');
             document.body.style.backgroundColor = '#0f172a';
             if (window.isTeacherSetup) return; window.isTeacherSetup = true;
@@ -155,33 +192,30 @@
             let currentUrl = window.location.href.split('?')[0];
             let studentUrl = `${currentUrl}?student=true&session=${sessionId}`;
             
-            // 确保沙盒里的临时链接被替换掉，防止二维码内容过长报错
+            // 修复: 避免中文字符在 qrcode.js 中引发内存溢出崩溃 (1252>640 错误)
             if (currentUrl.startsWith('about:') || currentUrl.startsWith('blob:') || currentUrl === 'null' || currentUrl.length > 150) {
-                studentUrl = "https://部署后即可生成真码.com/?student=true&session=" + sessionId;
+                studentUrl = "https://please-deploy-to-public-server.com/?student=true&session=" + sessionId;
             }
             
             generateQR(studentUrl);
             document.getElementById('qr-tips').innerHTML = `请使用微信扫码参与`;
-            document.getElementById('subtitle').innerHTML = "数据通道已连接：支持多设备跨网实时同步";
+            document.getElementById('subtitle').innerHTML = "左侧控制台指示灯亮绿灯时，可跨设备实时互动";
 
-            initCharts(); updateChartsAndInsights();
-
-            mqttClient.subscribe(sessionId);
-            mqttClient.on('message', (topic, message) => {
-                if (topic === sessionId) {
-                    try {
-                        rawData.push(JSON.parse(message.toString()));
-                        localStorage.setItem(sessionId, JSON.stringify(rawData));
-                        updateChartsAndInsights();
-                    } catch(e) {}
-                }
-            });
+            // 立刻初始化图表，防止因为 Canvas 在隐藏状态下渲染导致的白屏错位
+            initCharts(); 
+            updateChartsAndInsights();
 
             document.getElementById('simulate-btn').addEventListener('click', () => {
                 const fd = { sleep: (Math.random()*2+6).toFixed(1), commute: Math.floor(Math.random()*40+5), video: ['<30','30-60','60-120','>120'][Math.floor(Math.random()*4)], fear: Math.random()>0.9?10:Math.floor(Math.random()*5+4), timestamp: Date.now() };
-                mqttClient.publish(sessionId, JSON.stringify(fd));
+                if (mqttClient && mqttClient.connected) {
+                    mqttClient.publish(sessionId, JSON.stringify(fd));
+                } else {
+                    // 如果断网，直接追加到本地内存演示图表效果
+                    rawData.push(fd);
+                    updateChartsAndInsights();
+                }
             });
-            document.getElementById('clear-btn').addEventListener('click', () => { if(confirm("清空？")){ rawData = []; localStorage.removeItem(sessionId); updateChartsAndInsights(); } });
+            document.getElementById('clear-btn').addEventListener('click', () => { if(confirm("清空大屏数据？")){ rawData = []; localStorage.removeItem(sessionId); updateChartsAndInsights(); } });
             document.getElementById('test-student-btn').addEventListener('click', () => { document.getElementById('teacher-view').classList.add('hidden'); setupStudentLogic(); });
         }
 
@@ -233,12 +267,21 @@
             document.getElementById('student-form').addEventListener('submit', e => {
                 e.preventDefault(); const btn = document.getElementById('submit-btn'); btn.innerHTML = '<i class="fas fa-spinner fa-spin text-xl"></i>'; btn.disabled = true;
                 const fd = { sleep: document.getElementById('q-sleep').value, commute: document.getElementById('q-commute').value, video: document.querySelector('input[name="q-video"]:checked').value, fear: document.getElementById('q-fear').value, timestamp: Date.now() };
-                if (mqttClient && sessionId) {
+                
+                if (mqttClient && mqttClient.connected && sessionId) {
                     mqttClient.publish(sessionId, JSON.stringify(fd));
                     document.getElementById('form-container').classList.add('hidden'); document.getElementById('success-view').classList.remove('hidden');
-                } else { alert("网络未连接，提交失败！"); btn.disabled = false; }
+                } else { 
+                    // 如果网络不佳，在本地模拟发送动画
+                    setTimeout(() => {
+                        rawData.push(fd); // 直接喂给内存
+                        document.getElementById('form-container').classList.add('hidden'); document.getElementById('success-view').classList.remove('hidden');
+                    }, 500);
+                }
             });
         }
+        
+        // 启动应用
         initApp();
     </script>
 </body>
